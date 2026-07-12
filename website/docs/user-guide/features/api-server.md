@@ -442,12 +442,15 @@ platforms:
           model: "openai/gpt-4o-mini"
           provider: "openai"
           toolsets: [web, no_mcp]  # Optional: only for requests using "coding"
+          reasoning_effort: "low"  # Optional: only for requests using "coding"
 ```
 
 Configured aliases are returned by `GET /v1/models`. A route can also set a
 provider API key or base URL. Its `toolsets` use the normal API-server toolset
 resolution and do not modify global configuration; `no_mcp` is supported. A
-session-level `/model` selection takes precedence over a route.
+Its `reasoning_effort` accepts the normal Hermes levels (`none`, `minimal`,
+`low`, `medium`, `high`, `xhigh`, `max`, `ultra`) and does not modify global
+configuration. A session-level `/model` selection takes precedence over a route.
 
 ## Security Headers
 
