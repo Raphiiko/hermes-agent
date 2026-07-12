@@ -4035,6 +4035,18 @@ class TestModelRoutesParsing:
         )
         assert adapter._model_routes["a"] == {"model": "m", "provider": "p"}
 
+    def test_route_toolsets_are_parsed(self):
+        adapter = _make_routing_adapter(
+            {"a": {"model": "m", "toolsets": [" web ", "no_mcp"]}}
+        )
+        assert adapter._model_routes["a"]["toolsets"] == ["web", "no_mcp"]
+
+    def test_route_with_invalid_toolsets_is_dropped(self):
+        adapter = _make_routing_adapter(
+            {"bad": {"model": "m", "toolsets": "no_mcp"}}
+        )
+        assert adapter._model_routes == {}
+
     def test_resolve_route_lookup(self):
         adapter = _make_routing_adapter({"minimax-m2": {"model": "minimax/minimax-m1"}})
         assert adapter._resolve_route("minimax-m2") == {"model": "minimax/minimax-m1"}
@@ -4141,6 +4153,32 @@ class TestModelRoutesHandlers:
 
 
 class TestModelRoutesAgentCreation:
+    def test_route_overrides_toolsets_without_mutating_global_config(self, monkeypatch):
+        from hermes_cli.tools_config import _get_platform_tools
+
+        captured = {}
+        user_config = {"platform_toolsets": {"api_server": ["web"]}}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: user_config)
+        monkeypatch.setattr(
+            "hermes_cli.tools_config._get_platform_tools", _get_platform_tools
+        )
+        adapter = _make_routing_adapter(
+            {"alias": {"model": "other/model", "toolsets": ["no_mcp"]}}
+        )
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+
+        adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
+
+        assert captured["enabled_toolsets"] == []
+        assert user_config == {"platform_toolsets": {"api_server": ["web"]}}
+
     def test_route_overrides_model_and_credentials(self, monkeypatch):
         captured = {}
 
