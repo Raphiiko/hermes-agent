@@ -961,6 +961,7 @@ class APIServerAdapter(BasePlatformAdapter):
         #                                # key override (NOT caller auth; never logged)
         #       base_url: "https://…"    # optional — per-route base URL override
         #       toolsets: [web, no_mcp]   # optional — per-route platform toolsets
+        #       reasoning_effort: "low"  # optional — per-route reasoning override
         self._model_routes: Dict[str, Dict[str, Any]] = self._parse_model_routes(
             extra.get("model_routes"),
         )
@@ -1631,7 +1632,8 @@ class APIServerAdapter(BasePlatformAdapter):
         """Validate and normalize the ``model_routes`` config block.
 
         Accepts a mapping of
-        ``alias -> {model, provider?, api_key?, base_url?, toolsets?}``.
+        ``alias -> {model, provider?, api_key?, base_url?, toolsets?,
+        reasoning_effort?}``.
         Invalid shapes are dropped (never raised) so a config typo can't take
         the whole API server down.  Route values are coerced to strings.
 
@@ -1675,6 +1677,20 @@ class APIServerAdapter(BasePlatformAdapter):
                     )
                     continue
                 route["toolsets"] = [name.strip() for name in toolsets]
+            if "reasoning_effort" in cfg and cfg["reasoning_effort"] is not None:
+                from hermes_constants import parse_reasoning_effort
+
+                effort = cfg["reasoning_effort"]
+                if parse_reasoning_effort(effort) is None:
+                    logger.warning(
+                        "api_server model_routes: route %r has invalid "
+                        "'reasoning_effort'; dropping",
+                        alias_str,
+                    )
+                    continue
+                route["reasoning_effort"] = (
+                    False if effort is False else str(effort).strip().lower()
+                )
             if not route.get("model"):
                 logger.warning(
                     "api_server model_routes: route %r has no 'model'; dropping", alias_str
@@ -1738,8 +1754,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
         ``route`` is an optional ``model_routes`` entry (per-client model
         routing).  When set — and no session ``/model`` override exists for
-        this session — its model/provider/api_key/base_url/toolsets override the
-        global defaults for this agent instance only.
+        this session — its model/provider/api_key/base_url/toolsets/reasoning
+        effort override the global defaults for this agent instance only.
         """
         from run_agent import AIAgent
         from gateway.run import (
@@ -1801,6 +1817,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 runtime_kwargs["api_key"] = route["api_key"]
             if route.get("base_url"):
                 runtime_kwargs["base_url"] = route["base_url"]
+            if "reasoning_effort" in route:
+                from hermes_constants import parse_reasoning_effort
+
+                reasoning_config = parse_reasoning_effort(route["reasoning_effort"])
             logger.debug(
                 "api_server model route applied: model=%s provider=%s",
                 model,
