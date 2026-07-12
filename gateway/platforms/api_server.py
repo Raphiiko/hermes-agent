@@ -960,6 +960,7 @@ class APIServerAdapter(BasePlatformAdapter):
         #       api_key: "sk-…"          # optional — per-route UPSTREAM provider
         #                                # key override (NOT caller auth; never logged)
         #       base_url: "https://…"    # optional — per-route base URL override
+        #       toolsets: [web, no_mcp]   # optional — per-route platform toolsets
         self._model_routes: Dict[str, Dict[str, Any]] = self._parse_model_routes(
             extra.get("model_routes"),
         )
@@ -1629,7 +1630,8 @@ class APIServerAdapter(BasePlatformAdapter):
     def _parse_model_routes(raw: Any) -> Dict[str, Dict[str, Any]]:
         """Validate and normalize the ``model_routes`` config block.
 
-        Accepts a mapping of ``alias -> {model, provider?, api_key?, base_url?}``.
+        Accepts a mapping of
+        ``alias -> {model, provider?, api_key?, base_url?, toolsets?}``.
         Invalid shapes are dropped (never raised) so a config typo can't take
         the whole API server down.  Route values are coerced to strings.
 
@@ -1657,11 +1659,22 @@ class APIServerAdapter(BasePlatformAdapter):
                     "api_server model_routes: dropping invalid route entry %r", alias_str or alias
                 )
                 continue
-            route = {
+            route: Dict[str, Any] = {
                 key: str(cfg[key]).strip()
                 for key in allowed_keys
                 if cfg.get(key) is not None and str(cfg[key]).strip()
             }
+            if "toolsets" in cfg:
+                toolsets = cfg["toolsets"]
+                if not isinstance(toolsets, list) or not all(
+                    isinstance(name, str) and name.strip() for name in toolsets
+                ):
+                    logger.warning(
+                        "api_server model_routes: route %r has invalid 'toolsets'; dropping",
+                        alias_str,
+                    )
+                    continue
+                route["toolsets"] = [name.strip() for name in toolsets]
             if not route.get("model"):
                 logger.warning(
                     "api_server model_routes: route %r has no 'model'; dropping", alias_str
@@ -1725,7 +1738,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         ``route`` is an optional ``model_routes`` entry (per-client model
         routing).  When set — and no session ``/model`` override exists for
-        this session — its model/provider/api_key/base_url override the
+        this session — its model/provider/api_key/base_url/toolsets override the
         global defaults for this agent instance only.
         """
         from run_agent import AIAgent
@@ -1800,6 +1813,11 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         user_config = _load_gateway_config()
+        if route and not session_override and "toolsets" in route:
+            user_config = dict(user_config)
+            platform_toolsets = dict(user_config.get("platform_toolsets") or {})
+            platform_toolsets["api_server"] = route["toolsets"]
+            user_config["platform_toolsets"] = platform_toolsets
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = _current_max_iterations()
