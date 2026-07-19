@@ -353,7 +353,7 @@ class TestAdapterInit:
         )
         monkeypatch.setattr(
             "gateway.run.GatewayRunner._load_reasoning_config",
-            staticmethod(lambda: {"enabled": True, "effort": "xhigh"}),
+            staticmethod(lambda model="": {"enabled": True, "effort": "xhigh"}),
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
@@ -386,7 +386,7 @@ class TestAdapterInit:
         monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {"agent": {"max_turns": 200}})
         monkeypatch.setattr(
             "gateway.run.GatewayRunner._load_reasoning_config",
-            staticmethod(lambda: {}),
+            staticmethod(lambda model="": {}),
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 200)
@@ -426,7 +426,7 @@ class TestAdapterInit:
         monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
         monkeypatch.setattr(
             "gateway.run.GatewayRunner._load_reasoning_config",
-            staticmethod(lambda: {}),
+            staticmethod(lambda model="": {}),
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 90)
@@ -464,7 +464,7 @@ class TestAdapterInit:
         monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
         monkeypatch.setattr(
             "gateway.run.GatewayRunner._load_reasoning_config",
-            staticmethod(lambda: {}),
+            staticmethod(lambda model="": {}),
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 90)
@@ -4047,6 +4047,12 @@ class TestModelRoutesParsing:
         )
         assert adapter._model_routes == {}
 
+    def test_route_with_empty_toolsets_is_dropped(self):
+        adapter = _make_routing_adapter(
+            {"bad": {"model": "m", "toolsets": []}}
+        )
+        assert adapter._model_routes == {}
+
     def test_route_reasoning_effort_is_parsed(self):
         adapter = _make_routing_adapter(
             {"a": {"model": "m", "reasoning_effort": " HIGH "}}
@@ -4165,11 +4171,45 @@ class TestModelRoutesHandlers:
 
 
 class TestModelRoutesAgentCreation:
-    def test_route_overrides_toolsets_without_mutating_global_config(self, monkeypatch):
+    def test_bare_no_mcp_uses_default_native_tools(self, monkeypatch):
         from hermes_cli.tools_config import _get_platform_tools
+        from model_tools import get_tool_definitions
 
         captured = {}
-        user_config = {"platform_toolsets": {"api_server": ["web"]}}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr(
+            "hermes_cli.tools_config._get_platform_tools", _get_platform_tools
+        )
+        adapter = _make_routing_adapter(
+            {"alias": {"model": "other/model", "toolsets": ["no_mcp"]}}
+        )
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+
+        adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
+
+        assert captured["enabled_toolsets"]
+        schemas = get_tool_definitions(
+            enabled_toolsets=captured["enabled_toolsets"], quiet_mode=True
+        )
+        assert {schema["function"]["name"] for schema in schemas} >= {
+            "terminal",
+            "process",
+        }
+
+    def test_bare_no_mcp_preserves_native_tools_without_mutating_global_config(
+        self, monkeypatch
+    ):
+        from hermes_cli.tools_config import _get_platform_tools
+        from model_tools import get_tool_definitions
+
+        captured = {}
+        user_config = {"platform_toolsets": {"api_server": ["terminal"]}}
 
         class FakeAgent:
             def __init__(self, **kwargs):
@@ -4188,8 +4228,79 @@ class TestModelRoutesAgentCreation:
 
         adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
 
-        assert captured["enabled_toolsets"] == []
-        assert user_config == {"platform_toolsets": {"api_server": ["web"]}}
+        assert captured["enabled_toolsets"] == ["terminal"]
+        schemas = get_tool_definitions(
+            enabled_toolsets=captured["enabled_toolsets"], quiet_mode=True
+        )
+        assert {schema["function"]["name"] for schema in schemas} >= {
+            "terminal",
+            "process",
+        }
+        assert user_config == {"platform_toolsets": {"api_server": ["terminal"]}}
+
+    def test_route_toolsets_override_global_selection(self, monkeypatch):
+        from hermes_cli.tools_config import _get_platform_tools
+        from model_tools import get_tool_definitions
+
+        captured = {}
+        user_config = {"platform_toolsets": {"api_server": ["terminal"]}}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: user_config)
+        monkeypatch.setattr(
+            "hermes_cli.tools_config._get_platform_tools", _get_platform_tools
+        )
+        adapter = _make_routing_adapter(
+            {"alias": {"model": "other/model", "toolsets": ["file"]}}
+        )
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+
+        adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
+
+        assert captured["enabled_toolsets"] == ["file"]
+        schema_names = {
+            schema["function"]["name"]
+            for schema in get_tool_definitions(
+                enabled_toolsets=captured["enabled_toolsets"], quiet_mode=True
+            )
+        }
+        assert "read_file" in schema_names
+        assert "terminal" not in schema_names
+        assert user_config == {"platform_toolsets": {"api_server": ["terminal"]}}
+
+    def test_unknown_route_toolset_falls_back_to_global_selection(
+        self, monkeypatch, caplog
+    ):
+        from hermes_cli.tools_config import _get_platform_tools
+
+        captured = {}
+        user_config = {"platform_toolsets": {"api_server": ["terminal"]}}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: user_config)
+        monkeypatch.setattr(
+            "hermes_cli.tools_config._get_platform_tools", _get_platform_tools
+        )
+        adapter = _make_routing_adapter(
+            {"alias": {"model": "other/model", "toolsets": ["weeb", "no_mcp"]}}
+        )
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+
+        adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
+
+        assert captured["enabled_toolsets"] == ["terminal"]
+        assert "unknown toolset(s) weeb" in caplog.text
+        assert user_config == {"platform_toolsets": {"api_server": ["terminal"]}}
 
     def test_route_overrides_reasoning_effort(self, monkeypatch):
         captured = {}
@@ -4199,6 +4310,10 @@ class TestModelRoutesAgentCreation:
                 captured.update(kwargs)
 
         _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda model="": {"enabled": True, "effort": "high"}),
+        )
         adapter = _make_routing_adapter(
             {"alias": {"model": "other/model", "reasoning_effort": "low"}}
         )
@@ -4208,6 +4323,32 @@ class TestModelRoutesAgentCreation:
         adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
 
         assert captured["reasoning_config"] == {"enabled": True, "effort": "low"}
+
+    def test_route_model_selects_per_model_reasoning_override(self, monkeypatch):
+        captured = {}
+        reasoning_models = []
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        def load_reasoning(model=""):
+            reasoning_models.append(model)
+            return {"enabled": True, "effort": "xhigh"}
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(load_reasoning),
+        )
+        adapter = _make_routing_adapter({"alias": {"model": "routed/model"}})
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+
+        adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
+
+        assert reasoning_models == ["routed/model"]
+        assert captured["reasoning_config"] == {"enabled": True, "effort": "xhigh"}
 
     def test_route_overrides_model_and_credentials(self, monkeypatch):
         captured = {}
@@ -4284,18 +4425,26 @@ class TestModelRoutesAgentCreation:
 
     def test_session_model_override_beats_route(self, monkeypatch):
         """A user-issued /model on the session must win over static route config."""
+        from hermes_cli.tools_config import _get_platform_tools
+
         captured = {}
+        user_config = {"platform_toolsets": {"api_server": ["terminal"]}}
 
         class FakeAgent:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
         _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: user_config)
+        monkeypatch.setattr(
+            "hermes_cli.tools_config._get_platform_tools", _get_platform_tools
+        )
         adapter = _make_routing_adapter(
             {"alias": {
                 "model": "route/model",
                 "api_key": "sk-route",
                 "reasoning_effort": "low",
+                "toolsets": ["file"],
             }}
         )
         monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
@@ -4312,6 +4461,7 @@ class TestModelRoutesAgentCreation:
         assert captured["model"] == "global/model"
         assert captured["api_key"] == "sk-global"
         assert captured["reasoning_config"] == {}
+        assert captured["enabled_toolsets"] == ["terminal"]
 
     def test_session_override_lookup_reads_gateway_runner(self, monkeypatch):
         """_session_model_override_for consults GatewayRunner._session_model_overrides."""
