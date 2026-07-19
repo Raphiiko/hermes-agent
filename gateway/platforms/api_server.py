@@ -2312,7 +2312,7 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             if "toolsets" in cfg:
                 toolsets = cfg["toolsets"]
-                if not isinstance(toolsets, list) or not all(
+                if not isinstance(toolsets, list) or not toolsets or not all(
                     isinstance(name, str) and name.strip() for name in toolsets
                 ):
                     logger.warning(
