@@ -1682,7 +1682,7 @@ class APIServerAdapter(BasePlatformAdapter):
         ``alias -> {model, provider?, api_key?, base_url?, toolsets?,
         reasoning_effort?}``.
         Invalid shapes are dropped (never raised) so a config typo can't take
-        the whole API server down.  Route values are coerced to strings.
+        the whole API server down. Scalar route values are coerced to strings.
 
         Security: per-route ``api_key`` values are UPSTREAM provider
         credentials (used to call the routed model's backend), not caller
@@ -1715,7 +1715,7 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             if "toolsets" in cfg:
                 toolsets = cfg["toolsets"]
-                if not isinstance(toolsets, list) or not all(
+                if not isinstance(toolsets, list) or not toolsets or not all(
                     isinstance(name, str) and name.strip() for name in toolsets
                 ):
                     logger.warning(
@@ -1812,10 +1812,12 @@ class APIServerAdapter(BasePlatformAdapter):
             _load_gateway_config,
             GatewayRunner,
         )
-        from hermes_cli.tools_config import _get_platform_tools
+        from hermes_cli.tools_config import (
+            _get_platform_tools,
+            enabled_mcp_server_names,
+        )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
-        reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
         # When the primary provider's auth fails (expired token / 429 quota
@@ -1864,10 +1866,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 runtime_kwargs["api_key"] = route["api_key"]
             if route.get("base_url"):
                 runtime_kwargs["base_url"] = route["base_url"]
-            if "reasoning_effort" in route:
-                from hermes_constants import parse_reasoning_effort
-
-                reasoning_config = parse_reasoning_effort(route["reasoning_effort"])
             logger.debug(
                 "api_server model route applied: model=%s provider=%s",
                 model,
@@ -1879,12 +1877,51 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key or session_id,
             )
 
+        # Resolve per-model reasoning only after the route (or fallback runtime)
+        # has selected the effective model. An explicit route effort remains the
+        # highest-priority static setting.
+        reasoning_config = GatewayRunner._load_reasoning_config(model)
+        if route and not session_override and "reasoning_effort" in route:
+            from hermes_constants import parse_reasoning_effort
+
+            reasoning_config = parse_reasoning_effort(route["reasoning_effort"])
+
         user_config = _load_gateway_config()
         if route and not session_override and "toolsets" in route:
-            user_config = dict(user_config)
-            platform_toolsets = dict(user_config.get("platform_toolsets") or {})
-            platform_toolsets["api_server"] = route["toolsets"]
-            user_config["platform_toolsets"] = platform_toolsets
+            route_toolsets = route["toolsets"]
+            from toolsets import validate_toolset
+
+            valid_mcp_servers = enabled_mcp_server_names(user_config)
+            invalid_toolsets = [
+                name
+                for name in route_toolsets
+                if name != "no_mcp"
+                and name not in valid_mcp_servers
+                and not validate_toolset(name)
+            ]
+            if invalid_toolsets:
+                logger.warning(
+                    "api_server model route for %r has unknown toolset(s) %s; "
+                    "using the normal API-server tool selection",
+                    model,
+                    ", ".join(invalid_toolsets),
+                )
+            else:
+                user_config = dict(user_config)
+                platform_toolsets = dict(user_config.get("platform_toolsets") or {})
+                if set(route_toolsets) == {"no_mcp"}:
+                    # ``no_mcp`` is an opt-out sentinel, not a native toolset.
+                    # On its own it must preserve the API server's normal tool
+                    # selection rather than replacing it with an empty one.
+                    configured_toolsets = platform_toolsets.get("api_server")
+                    if not isinstance(configured_toolsets, list):
+                        configured_toolsets = ["hermes-api-server"]
+                    route_toolsets = [
+                        *[name for name in configured_toolsets if name != "no_mcp"],
+                        "no_mcp",
+                    ]
+                platform_toolsets["api_server"] = route_toolsets
+                user_config["platform_toolsets"] = platform_toolsets
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = _current_max_iterations()
