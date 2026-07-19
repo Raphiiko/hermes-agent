@@ -1721,6 +1721,7 @@ class APIServerAdapter(BasePlatformAdapter):
             runner = _gateway_runner_ref()
             if runner is None:
                 return None
+            runner._rehydrate_session_model_override(session_key)
             override = runner._session_model_overrides.get(session_key)
             return dict(override) if isinstance(override, dict) else None
         except Exception:
@@ -1793,7 +1794,38 @@ class APIServerAdapter(BasePlatformAdapter):
         session_override = self._session_model_override_for(
             gateway_session_key or session_id
         )
-        if route and not session_override:
+        if session_override:
+            override_provider = session_override.get("provider")
+            if override_provider:
+                try:
+                    from gateway.run import _resolve_runtime_agent_kwargs_for_provider
+
+                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
+                        override_provider
+                    )
+                    runtime_kwargs.pop("model", None)
+                except Exception:
+                    # Never retain another provider's credentials when the
+                    # selected provider cannot be resolved.
+                    runtime_kwargs = {"provider": override_provider}
+            model = session_override.get("model", model)
+            for key in (
+                "provider",
+                "api_key",
+                "base_url",
+                "api_mode",
+                "max_tokens",
+                "credential_pool",
+            ):
+                value = session_override.get(key)
+                if value is not None:
+                    runtime_kwargs[key] = value
+            logger.debug(
+                "api_server session model override applied: model=%s provider=%s",
+                model,
+                runtime_kwargs.get("provider"),
+            )
+        elif route:
             if route.get("provider"):
                 # Resolve real credentials for the routed provider (mirrors
                 # the channel_overrides path in gateway/run.py) so a route
@@ -1824,11 +1856,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 model,
                 runtime_kwargs.get("provider"),
             )
-        elif route and session_override:
-            logger.debug(
-                "api_server model route skipped: session /model override wins for %s",
-                gateway_session_key or session_id,
-            )
+
 
         # Resolve per-model reasoning only after the route (or fallback runtime)
         # has selected the effective model. An explicit route effort remains the

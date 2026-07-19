@@ -4435,6 +4435,14 @@ class TestModelRoutesAgentCreation:
                 captured.update(kwargs)
 
         _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        reasoning_models = []
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(
+                lambda model="": reasoning_models.append(model)
+                or {"enabled": True, "effort": "high"}
+            ),
+        )
         monkeypatch.setattr("gateway.run._load_gateway_config", lambda: user_config)
         monkeypatch.setattr(
             "hermes_cli.tools_config._get_platform_tools", _get_platform_tools
@@ -4451,17 +4459,62 @@ class TestModelRoutesAgentCreation:
         monkeypatch.setattr(
             adapter,
             "_session_model_override_for",
-            lambda key: {"model": "session/override-model"},
+            lambda key: {
+                "model": "session/override-model",
+                "provider": "session-provider",
+                "api_key": "sk-session",
+                "base_url": "https://session.example/v1",
+                "api_mode": "responses",
+            },
         )
 
         adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
 
-        # The route must NOT be applied — the session override path (global
-        # runtime here, since the gateway applies /model separately) wins.
-        assert captured["model"] == "global/model"
-        assert captured["api_key"] == "sk-global"
-        assert captured["reasoning_config"] == {}
+        assert captured["model"] == "session/override-model"
+        assert captured["provider"] == "session-provider"
+        assert captured["api_key"] == "sk-session"
+        assert captured["base_url"] == "https://session.example/v1"
+        assert captured["api_mode"] == "responses"
+        assert reasoning_models == ["session/override-model"]
+        assert captured["reasoning_config"] == {"enabled": True, "effort": "high"}
         assert captured["enabled_toolsets"] == ["terminal"]
+
+    def test_session_override_resolves_provider_credentials(self, monkeypatch):
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+            lambda provider: {
+                "provider": provider,
+                "api_key": "sk-session-resolved",
+                "base_url": "https://session-resolved.example/v1",
+                "api_mode": "responses",
+                "model": "provider/default-model",
+            },
+        )
+        adapter = _make_routing_adapter({})
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(
+            adapter,
+            "_session_model_override_for",
+            lambda key: {
+                "model": "session/override-model",
+                "provider": "session-provider",
+            },
+        )
+
+        adapter._create_agent(session_id="s1")
+
+        assert captured["model"] == "session/override-model"
+        assert captured["provider"] == "session-provider"
+        assert captured["api_key"] == "sk-session-resolved"
+        assert captured["base_url"] == "https://session-resolved.example/v1"
+        assert captured["api_mode"] == "responses"
 
     def test_session_override_lookup_reads_gateway_runner(self, monkeypatch):
         """_session_model_override_for consults GatewayRunner._session_model_overrides."""
@@ -4469,8 +4522,14 @@ class TestModelRoutesAgentCreation:
 
         class FakeRunner:
             _session_model_overrides = {"chan-1": {"model": "user/model"}}
+            rehydrated = []
+
+            @classmethod
+            def _rehydrate_session_model_override(cls, session_key):
+                cls.rehydrated.append(session_key)
 
         monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: FakeRunner())
         assert adapter._session_model_override_for("chan-1") == {"model": "user/model"}
         assert adapter._session_model_override_for("chan-2") is None
         assert adapter._session_model_override_for(None) is None
+        assert FakeRunner.rehydrated == ["chan-1", "chan-2"]
