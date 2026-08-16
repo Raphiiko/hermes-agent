@@ -289,6 +289,28 @@ If a request sends a `provider` that conflicts with a configured `model_routes`
 alias, Hermes rejects the request with `400` instead of silently remixing route
 credentials with another provider.
 
+Example route configuration:
+
+```yaml
+gateway:
+  platforms:
+    api_server:
+      extra:
+        model_routes:
+          minimax-m2:
+            model: minimax/minimax-m1
+            provider: openrouter
+            toolsets: [web, no_mcp]
+            reasoning_effort: low
+```
+
+Route `toolsets` are validated against the installed native toolsets and enabled
+MCP servers. Unknown names cause the route's normal API-server tool selection to
+be used instead. `no_mcp` is an opt-out sentinel; when used by itself it keeps
+the normal API-server toolsets and prevents MCP additions. `reasoning_effort`
+is parsed using Hermes' normal reasoning settings and is overridden by an
+explicit per-request `model_options` value.
+
 **Bare `model` values on the OpenAI-compatible endpoints are opt-in.** Generic
 OpenAI clients routinely hardcode model names (`gpt-4o`, ...), and existing
 deployments rely on those falling back to the gateway default. On

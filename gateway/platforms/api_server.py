@@ -2699,7 +2699,10 @@ class APIServerAdapter(BasePlatformAdapter):
             _load_gateway_config,
             GatewayRunner,
         )
-        from hermes_cli.tools_config import _get_platform_tools
+        from hermes_cli.tools_config import (
+            _get_platform_tools,
+            enabled_mcp_server_names,
+        )
 
         # Catch RuntimeError ONLY around this call, not the wider
         # _create_agent()+run_conversation() span --
@@ -2921,10 +2924,40 @@ class APIServerAdapter(BasePlatformAdapter):
 
         user_config = _load_gateway_config()
         if route and not session_override and "toolsets" in route:
-            user_config = dict(user_config)
-            platform_toolsets = dict(user_config.get("platform_toolsets") or {})
-            platform_toolsets["api_server"] = route["toolsets"]
-            user_config["platform_toolsets"] = platform_toolsets
+            route_toolsets = route["toolsets"]
+            from toolsets import validate_toolset
+
+            valid_mcp_servers = enabled_mcp_server_names(user_config)
+            invalid_toolsets = [
+                name
+                for name in route_toolsets
+                if name != "no_mcp"
+                and name not in valid_mcp_servers
+                and not validate_toolset(name)
+            ]
+            if invalid_toolsets:
+                logger.warning(
+                    "api_server model route for %r has unknown toolset(s) %s; "
+                    "using the normal API-server tool selection",
+                    model,
+                    ", ".join(invalid_toolsets),
+                )
+            else:
+                user_config = dict(user_config)
+                platform_toolsets = dict(user_config.get("platform_toolsets") or {})
+                if set(route_toolsets) == {"no_mcp"}:
+                    # ``no_mcp`` is an opt-out sentinel, not a native toolset.
+                    # On its own it must preserve the API server's normal tool
+                    # selection rather than replacing it with an empty one.
+                    configured_toolsets = platform_toolsets.get("api_server")
+                    if not isinstance(configured_toolsets, list):
+                        configured_toolsets = ["hermes-api-server"]
+                    route_toolsets = [
+                        *[name for name in configured_toolsets if name != "no_mcp"],
+                        "no_mcp",
+                    ]
+                platform_toolsets["api_server"] = route_toolsets
+                user_config["platform_toolsets"] = platform_toolsets
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = _current_max_iterations()
