@@ -1884,31 +1884,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     @staticmethod
     def _parse_model_routes(raw: Any) -> dict[str, dict[str, Any]]:
-        """Validate ``model_routes`` (``alias -> {model, provider?, api_key?, base_url?}``); invalid
-        shapes are dropped, never raised. Route ``api_key`` is an UPSTREAM credential: never log."""
-        if not isinstance(raw, dict):
-            if raw:
-                logger.warning(
-                    "api_server model_routes ignored: expected a mapping, got %s", type(raw).__name__)
-            return {}
-        allowed_keys = ("model", "provider", "api_key", "base_url")
-        routes: dict[str, dict[str, Any]] = {}
-        for alias, cfg in raw.items():
-            alias_str = str(alias).strip()
-            if not alias_str or not isinstance(cfg, dict):
-                logger.warning(
-                    "api_server model_routes: dropping invalid route entry %r", alias_str or alias)
-                continue
-            route = {
-                key: str(cfg[key]).strip()
-                for key in allowed_keys
-                if cfg.get(key) is not None and str(cfg[key]).strip()}
-            if not route.get("model"):
-                logger.warning(
-                    "api_server model_routes: route %r has no 'model'; dropping", alias_str)
-                continue
-            routes[alias_str] = route
-        return routes
+        """Validate aliases, transport overrides, toolsets and reasoning effort."""
+        from gateway.platforms.api_server_model_routes import parse_model_routes
+        return parse_model_routes(raw)
 
     def _resolve_route(self, model_alias: Any) -> Optional[dict[str, Any]]:
         """Return the model_routes entry for *model_alias*, or None."""
@@ -2313,7 +2291,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
             gateway_session_key=gateway_session_key, session_id=session_id)
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        route_policy = route if route and not (session_override or _clean_request_string(session_model) or confirmed_runtime_lock) else {}
+        if "toolsets" in route_policy:
+            from gateway.platforms.api_server_model_routes import route_toolsets
+            enabled_toolsets = route_toolsets(user_config, route_policy["toolsets"])
+        else:
+            enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
         # Same gate the messaging gateway and TUI apply: ``display.interim_assistant_messages``
         # off means no callback is installed, so mid-turn commentary never leaves the agent.
         if not resolve_display_setting(user_config, "api_server", "interim_assistant_messages", True):
@@ -2326,6 +2309,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             max_iterations = policy.max_iterations
         # Reasoning resolves against the model that actually runs (per-model overrides), so only
         # after the precedence chain settles; an explicit request wins.
+        if request_reasoning_config is None and "reasoning_effort" in route_policy:
+            from hermes_constants import parse_reasoning_effort
+            request_reasoning_config = parse_reasoning_effort(route_policy["reasoning_effort"])
         if request_reasoning_config is None:
             request_reasoning_config = GatewayRunner._load_reasoning_config(model)
         agent_kwargs = {

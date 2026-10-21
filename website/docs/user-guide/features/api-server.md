@@ -482,7 +482,7 @@ The same request fields are accepted on:
 Precedence is deterministic:
 
 1. Session `/model` override, if that session already has one
-2. A static `gateway.platforms.api_server.model_routes` mapping selected when
+2. A static `platforms.api_server.extra.model_routes` mapping selected when
    the request's `model` is a configured route alias
 3. Direct request `model` / `provider` when no route alias matches
 4. Global gateway config / environment defaults
@@ -491,6 +491,33 @@ Precedence is deterministic:
 If a request sends a `provider` that conflicts with a configured `model_routes`
 alias, Hermes rejects the request with `400` instead of silently remixing route
 credentials with another provider.
+
+Routes can also set a strict tool allow-list and reasoning effort:
+
+```yaml
+platforms:
+  api_server:
+    extra:
+      model_routes:
+        route-name:
+          provider: openai-codex
+          model: gpt-5.6-luna
+          toolsets: [no_mcp]
+          reasoning_effort: low
+```
+
+Omitting `toolsets` inherits the normal API-server tool configuration. A present
+list enables only the named individual toolsets and enabled MCP servers.
+Automatically enabled context, plugin, and MCP toolsets are excluded unless named
+explicitly. Empty or malformed lists, unknown names, and composite toolsets such
+as `hermes-api-server`, `safe`, or `all` resolve to no tools for the entire route.
+The compatibility sentinel `no_mcp` suppresses MCP servers and resolves to no tools
+when used alone. Global disabled toolsets still apply.
+
+`reasoning_effort` uses the normal Hermes reasoning parser, including `false` to
+disable reasoning. An explicit request `model_options` value takes precedence.
+Neither route setting changes another request's configuration. A session `/model`
+override skips the complete static route policy, including tools and reasoning.
 
 **Bare `model` values on the OpenAI-compatible endpoints are opt-in.** Generic
 OpenAI clients routinely hardcode model names (`gpt-4o`, ...), and existing
